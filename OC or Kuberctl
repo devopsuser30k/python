@@ -1,0 +1,84 @@
+# chatbot_basic.py (Flask UI with Kubernetes/OCP resource fetcher)
+import subprocess
+from datetime import datetime, timezone
+from flask import Flask, render_template_string, request
+import os
+import re
+
+app = Flask(__name__)
+
+HTML_TEMPLATE = """
+<!doctype html>
+<title>ChatBot</title>
+<h1>OCP/Kubernetes ChatBot Interface</h1>
+<form method=post>
+  <input name=user_input style="width: 300px;">
+  <input type=submit value=Send>
+</form>
+<div>
+  {% for line in chat_log %}
+    <p>{{ line }}</p>
+  {% endfor %}
+</div>
+"""
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S UTC]")
+
+def interpret_input_to_command(user_input: str) -> str:
+    lowered = user_input.lower()
+    is_ocp = lowered.startswith("ocp:")
+    is_kubectl = lowered.startswith("kubectl:")
+
+    if not (is_ocp or is_kubectl):
+        return ""
+
+    tool = "oc" if is_ocp else "kubectl"
+    lowered = lowered[len("ocp:"):] if is_ocp else lowered[len("kubectl:"):]
+    namespace_match = re.search(r"namespace\s+(\S+)", lowered)
+    namespace = namespace_match.group(1) if namespace_match else None
+
+    if "pods" in lowered:
+        return f"{tool} get pods -n {namespace}" if namespace else f"{tool} get pods -A"
+    elif "nodes" in lowered:
+        return f"{tool} get nodes"
+    elif "services" in lowered:
+        return f"{tool} get svc -n {namespace}" if namespace else f"{tool} get svc -A"
+    elif "deployments" in lowered:
+        return f"{tool} get deployments -n {namespace}" if namespace else f"{tool} get deployments -A"
+    elif "namespaces" in lowered:
+        return f"{tool} get ns"
+    elif "configmaps" in lowered:
+        return f"{tool} get configmaps -n {namespace}" if namespace else f"{tool} get configmaps -A"
+    elif "secrets" in lowered:
+        return f"{tool} get secrets -n {namespace}" if namespace else f"{tool} get secrets -A"
+    return ""
+
+def run_kubectl_command(command: str) -> str:
+    try:
+        result = subprocess.run(command.split(), capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.returncode == 0 else result.stderr.strip()
+    except Exception as e:
+        return f"[Error running command: {e}]"
+
+chat_history = []
+
+@app.route("/", methods=["GET", "POST"])
+def chat():
+    if request.method == "POST":
+        user_input = request.form.get("user_input", "")
+        chat_history.append(f"{utc_timestamp()} You: {user_input}")
+        if user_input.strip().lower() == "exit":
+            chat_history.append(f"{utc_timestamp()} ChatBot: Goodbye!")
+        else:
+            command = interpret_input_to_command(user_input)
+            if command:
+                response = run_kubectl_command(command)
+                chat_history.append(f"{utc_timestamp()} ChatBot: {response}")
+            else:
+                chat_history.append(f"{utc_timestamp()} ChatBot: Sorry, I couldn't understand your request.")
+    return render_template_string(HTML_TEMPLATE, chat_log=chat_history)
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    app.run(debug=True, port=port)
